@@ -60,12 +60,32 @@ function Multiworld:Connect(host, slot, password)
     end)
 end
 
--- function Multiworld:SendLocationCheck(location_id)
---     if ap then
---         table.insert(LocWaiting, location_id)
---         print("[AP] Location Check ID: " .. tostring(location_id) .. "\n")
---     end
--- end
+function Multiworld:PrintToGame(text)
+    local kismet_system = UEHelpers.GetKismetSystemLibrary()
+    if not kismet_system then 
+        print("[AP ERROR] Could not find KismetSystemLibrary.")
+        return 
+    end
+    
+    -- Using GetWorld() instead of LevelScriptActor guarantees 
+    -- the text is drawn to the player's active screen context.
+    local world = UEHelpers.GetWorld()
+    
+    if world and world:IsValid() then
+        print("[AP DEBUG] Firing PrintString to World...\n")
+        
+        kismet_system:PrintString(
+            world, 
+            tostring(text), 
+            true,  -- Print to screen
+            false, -- Don't print to UE4 log
+            {R=0.0, G=1.0, B=1.0, A=1.0}, -- Standard Cyan
+            15.0   -- Duration
+        )
+    else
+        print("[AP ERROR] World context was invalid, could not print.")
+    end
+end
 
 
 
@@ -114,7 +134,43 @@ end
 --================================
 --INTERCEPT ITEMS
 --================================
+
+local item_to_allow = nil
+-- fixes inventory
+function HookedOnInventoryItemAmountChangedPost(Context, pInventoryItem, iOldAmount, iNewAmount, bFromLoad)
+    print("In post-hook")
+    -- if item is a location send it -- CRUCIAL for scav hunt items
+
+    local item = pInventoryItem:get():GetFullName()
+    local _, path = item:match("([^ ]+) (.+)")
+    print(path)
+    local location_id = AP_Loc_Map[path]
+    if location_id then
+        print("[AP] Valid location check picked up! Sending to server: " .. tostring(location_id) .. "\n")
+        Multiworld:SendLocationCheck(location_id)
+    end
+    if iOldAmount:get() < iNewAmount:get() then
+        if not (item == item_to_allow) then
+            print("Not the item to allow")
+            local blueprint_library = StaticFindObject("/Script/Psychonauts2.Default__P2BlueprintLibrary")
+            if not blueprint_library:IsValid() then
+                print("No instance of class 'Default__P2BlueprintLibrary' was found.")
+                return
+            end
+            local persistent_level = UEHelpers:GetPersistentLevel()
+            local level_script_actor = persistent_level.LevelScriptActor
+
+            local amount_to_add = iNewAmount:get() - iOldAmount:get()
+            blueprint_library:RemoveFromRazInventory(level_script_actor, pInventoryItem:get(), amount_to_add)
+        else
+            print("Yes the item to allow")
+            item_to_allow = nil
+        end
+    end
+end
+-- handles collectable and sends location
 local function HandleCollectable(ContextWrapper)
+    print("In Collectable Pre-hook")
     local Context = ContextWrapper:get()
     if not Context or not Context:IsValid() then return end
 
@@ -128,18 +184,14 @@ local function HandleCollectable(ContextWrapper)
     local location_id = AP_Loc_Map[caller_path]
 
     if location_id then
-        print("[AP] Physical check picked up! Sending to server: " .. tostring(location_id) .. "\n")
+        print("[AP] Valid location check picked up! Sending to server: " .. tostring(location_id) .. "\n")
         Multiworld:SendLocationCheck(location_id)
-        
-        -- Destroy the actor to remove it from the world
-        pcall(function()
-            OwnerActor:K2_DestroyActor()
-        end)
-        
-        -- Cancel the vanilla C++ collectable function
-        return true
     end
 end
+
+
+
+RegisterHook("/Script/Psychonauts2.P2UpgradeManager:OnInventoryItemAmountChanged", function(_) end, HookedOnInventoryItemAmountChangedPost)
 
 RegisterHook("/Script/Psychonauts2.CoCollectable:OnCollectablePickedUp", function(ContextWrapper)
     return HandleCollectable(ContextWrapper)
@@ -152,6 +204,7 @@ end)
 function Multiworld:ReceiveItem(item_id)
     print(item_id)
     local item_path = AP_Item_Map[item_id]
+    item_to_allow = item_path
     if not item_path then
         print("[AP ERROR] Unknown Item ID received: " .. tostring(item_id) .. "\n")
         return
